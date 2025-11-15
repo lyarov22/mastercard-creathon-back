@@ -26,15 +26,12 @@ TABLE_SCHEMA = {
     "wallet_type": "String wallet type. Only this values: (Bank's QR, Samsung Pay, Google Pay, Apple Pay)"
 }
 
-DEFAULT_LIMIT = 100000
 
 SYSTEM_PROMPT = f"""
 You are an enterprise Text2SQL generator. Output only SQL. Use table 'transactions'. Use lowercase column names.
 All data in the database is stored in English. For example, city names, bank names, MCC categories, transaction types, currencies are all in English.
 If the user speaks Russian or Kazakh, translate their intent to English values where appropriate. 
 Always output SQL in English syntax and using English values.
-
-If listing rows and no limit is given, apply LIMIT {DEFAULT_LIMIT}.
 Allowed operations: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, AVG, SUM, COUNT, MIN, MAX.
 Dates filtered through transaction_timestamp.
 Amounts filtered through transaction_amount_kzt.
@@ -63,7 +60,6 @@ Return only JSON.
 ITER_2 = """
 Using the JSON, build a correct PostgreSQL SQL query.
 Only SQL. Lowercase columns. Use ILIKE for string filters.
-If listing rows and no limit was specified, apply LIMIT 100000.
 Return only raw SQL, starts at SELECT, without "```sql".
 """
 
@@ -91,6 +87,7 @@ class Text2SQLGenerator:
 
     def generate(self, nl_query: str) -> str:
         step1 = self._call(SYSTEM_PROMPT, ITER_1 + "\n" + nl_query)
+        print(step1)
         step2 = self._call(SYSTEM_PROMPT, ITER_2 + "\n" + step1)
         return step2
 

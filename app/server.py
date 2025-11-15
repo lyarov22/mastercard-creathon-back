@@ -9,27 +9,28 @@ app = FastAPI()
 
 engine = build_text2sql()  # твой генератор SQL
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
 @app.get("/process-text")
 def process_text_stream(text: str = Query(..., description="Текст для обработки")):
-    """
-    Генерация SQL из текста и отдача результата батчами.
-    """
-    try:
-        # Генерация SQL
-        sql = engine.generate(text)
-        print(f"Generated SQL: {sql}")
+    if not text:
+        raise HTTPException(status_code=400, detail="Query parameter 'text' is required")
+    print(text)
 
-        # Проверка, что это SELECT
-        if not sql.strip().upper().startswith("SELECT"):
-            raise HTTPException(status_code=400, detail="Generated SQL is not a SELECT query.")
+    sql = engine.generate(text)
+    print(sql)
+    if not sql:
+        raise HTTPException(status_code=400, detail="Failed to generate SQL from the text")
 
-        # Возвращаем стриминг
-        return StreamingResponse(stream_select_query(sql), media_type="application/json")
+    if not sql.strip().upper().startswith("SELECT"):
+        raise HTTPException(status_code=400, detail="Generated SQL is not a SELECT query.")
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(stream_select_query(sql), media_type="application/json")
 
 
 @app.get("/stream-sql")
