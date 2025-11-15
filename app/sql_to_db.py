@@ -2,12 +2,12 @@ import re
 from sqlalchemy import create_engine, text
 from app.config import DATABASE_URL
 
-BATCH_SIZE = 100000  # Максимальный размер батча
+BATCH_SIZE = 50000  # Максимальный размер батча
 
 
 def _is_select_query(sql_query: str) -> bool:
     """Проверяет, является ли запрос SELECT запросом."""
-    return sql_query.strip().upper().startswith('SELECT')
+    return sql_query.strip().upper().startswith(("SELECT", "WITH"))
 
 
 def _add_limit_offset(sql_query: str, limit: int, offset: int) -> str:

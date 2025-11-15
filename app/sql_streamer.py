@@ -18,13 +18,13 @@ def json_default(obj):
         return float(obj)
     return str(obj)
 
-def stream_select_query(sql_query: str, batch_size: int = 10_000):
+def stream_select_query(sql_query: str, batch_size: int = 50_000):
     """
     Энтерпрайс генератор SELECT запросов.
     Стримит JSON массивы батчами.
     Учитывает, что LIMIT может быть в SQL.
     """
-    if not sql_query or not sql_query.strip().upper().startswith("SELECT"):
+    if not sql_query or not sql_query.strip().upper().startswith(("SELECT", "WITH")):
         raise ValueError("Only SELECT queries are allowed")
 
     with engine.connect() as conn:

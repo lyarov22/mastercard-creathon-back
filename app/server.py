@@ -7,7 +7,7 @@ from app.sql_streamer import stream_select_query
 
 app = FastAPI()
 
-engine = build_text2sql()  # твой генератор SQL
+engine = build_text2sql()
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,7 +16,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Модель запроса
 class TextRequest(BaseModel):
     text: str
 
@@ -33,20 +32,4 @@ def process_text_stream(req: TextRequest):
     if not sql:
         raise HTTPException(status_code=400, detail="Failed to generate SQL from the text")
 
-    if not sql.strip().upper().startswith("SELECT"):
-        raise HTTPException(status_code=400, detail="Generated SQL is not a SELECT query.")
-
     return StreamingResponse(stream_select_query(sql), media_type="application/json")
-
-@app.post("/stream-sql")
-def stream_sql(req: TextRequest):
-    """Стриминг SELECT запроса напрямую (для отладки)."""
-    q = req.text.strip()
-    if not q:
-        raise HTTPException(status_code=400, detail="Field 'text' is required")
-    try:
-        return StreamingResponse(stream_select_query(q), media_type="application/json")
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
