@@ -1,7 +1,8 @@
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict
 from google import genai
 from google.genai import types
+from collections import defaultdict
 
 from app.config import LLM_API_KEY
 from app.models import (
@@ -81,32 +82,98 @@ class ProductionLLMContract:
         self.model = "gemini-2.5-flash"
         self.security_validator = SecurityValidator()
         self.table_schema = TABLE_SCHEMA
+        # Хранилище истории диалогов по user_id
+        self.conversation_history: Dict[str, List[types.Content]] = defaultdict(list)
+        # Максимальное количество пар сообщений (user + model) = 10 пар = 20 Content объектов
+        self.max_message_pairs = 10
     
-    def _call_gemini(self, system_instruction: str, user_text: str) -> str:
-        """Вызов Gemini API (сохраняем оригинальную логику)"""
-        contents = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=system_instruction), types.Part.from_text(text=user_text)]
-        )
+    def _call_gemini(
+        self, 
+        system_instruction: str, 
+        user_text: str, 
+        conversation_history: Optional[List[types.Content]] = None,
+        use_history: bool = True
+    ) -> str:
+        """Вызов Gemini API с поддержкой истории диалога"""
         config = types.GenerateContentConfig(
-            system_instruction=None,
+            system_instruction=system_instruction,
             temperature=0.0,
             max_output_tokens=5000
         )
+        
+        # Формируем содержимое запроса
+        contents_list = []
+        
+        # Добавляем историю диалога если есть
+        if use_history and conversation_history:
+            contents_list.extend(conversation_history)
+        
+        # Добавляем текущий запрос пользователя
+        user_content = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_text)]
+        )
+        contents_list.append(user_content)
+        
         response = client.models.generate_content(
             model=self.model,
-            contents=[contents],
+            contents=contents_list,
             config=config
         )
+        
         print("Gemini response received")
         return response.text
     
-    async def _determine_output_format(self, user_query: UserQuery) -> FormatDecision:
-        """Определение формата вывода"""
-        prompt = f"""
-        Определи формат вывода для запроса пользователя.
+    def _add_to_history(self, user_id: str, user_message: str, assistant_response: str):
+        """Добавление сообщений в историю диалога с автоматическим удалением старых"""
+        # Добавляем сообщение пользователя
+        user_content = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_message)]
+        )
+        self.conversation_history[user_id].append(user_content)
         
-        USER_QUERY: {user_query.natural_language_query}
+        # Добавляем ответ ассистента
+        assistant_content = types.Content(
+            role="model",
+            parts=[types.Part.from_text(text=assistant_response)]
+        )
+        self.conversation_history[user_id].append(assistant_content)
+        
+        # Ограничиваем длину истории: храним максимум max_message_pairs пар (каждая пара = 2 Content объекта)
+        max_content_objects = self.max_message_pairs * 2  # 10 пар = 20 объектов
+        if len(self.conversation_history[user_id]) > max_content_objects:
+            # Удаляем старые сообщения, оставляем только последние max_message_pairs пар
+            self.conversation_history[user_id] = self.conversation_history[user_id][-max_content_objects:]
+    
+    def _get_history(self, user_id: str) -> List[types.Content]:
+        """Получение истории диалога для пользователя"""
+        return self.conversation_history.get(user_id, [])
+    
+    def _clear_history(self, user_id: str):
+        """Очистка истории диалога для пользователя"""
+        if user_id in self.conversation_history:
+            del self.conversation_history[user_id]
+    
+    async def _determine_output_format(self, user_query: UserQuery) -> FormatDecision:
+        """Определение формата вывода с учетом контекста истории"""
+        history = self._get_history(user_query.user_id)
+        
+        context_prompt = ""
+        if history:
+            context_prompt = "\n\nКОНТЕКСТ ПРЕДЫДУЩИХ СООБЩЕНИЙ:\n"
+            # Берем последние 3 пары сообщений для контекста
+            recent_history = history[-6:] if len(history) > 6 else history
+            for content in recent_history:
+                role = "Пользователь" if content.role == "user" else "Ассистент"
+                text = content.parts[0].text if content.parts else ""
+                context_prompt += f"{role}: {text}\n"
+        
+        prompt = f"""
+        Определи формат вывода для запроса пользователя с учетом контекста предыдущих сообщений.
+        {context_prompt}
+        
+        ТЕКУЩИЙ ЗАПРОС ПОЛЬЗОВАТЕЛЯ: {user_query.natural_language_query}
         
         Возможные форматы:
         - "text": текстовый ответ, статистика, описания
@@ -114,27 +181,51 @@ class ProductionLLMContract:
         - "graph": данные для графиков (временные ряды, сравнения)
         - "diagram": диаграммы, распределения
         
+        Если запрос неясен или требует уточнения (например, не указаны параметры, даты, фильтры),
+        верни clarification_question с уточняющим вопросом на русском языке.
+        
         Верни JSON:
         {{
             "output_format": "text|table|graph|diagram",
             "confidence_score": 0.0-1.0,
-            "clarification_question": "null или вопрос для уточнения",
-            "refined_query": "уточненный запрос пользователя"
+            "clarification_question": null или "уточняющий вопрос на русском",
+            "refined_query": "уточненный запрос пользователя с учетом контекста"
         }}
         """
         
-        response = self._call_gemini(PRODUCTION_SYSTEM_PROMPT, prompt)
+        response = self._call_gemini(
+            PRODUCTION_SYSTEM_PROMPT, 
+            prompt,
+            conversation_history=history,
+            use_history=True
+        )
         try:
-            result = json.loads(response)
-            return FormatDecision(**result)
-        except:
-            # Fallback на table формат
-            return FormatDecision(
-                output_format="table",
-                confidence_score=0.7,
-                clarification_question=None,
-                refined_query=user_query.natural_language_query
-            )
+            # Пытаемся извлечь JSON из ответа
+            response_clean = response.strip()
+            if response_clean.startswith("```"):
+                parts = response_clean.split("```")
+                if len(parts) >= 3:
+                    json_part = parts[1]
+                    if json_part.startswith("json"):
+                        json_part = json_part[4:].strip()
+                    response_clean = json_part.strip()
+            
+            json_start = response_clean.find("{")
+            json_end = response_clean.rfind("}")
+            if json_start != -1 and json_end != -1:
+                json_str = response_clean[json_start:json_end + 1]
+                result = json.loads(json_str)
+                return FormatDecision(**result)
+        except Exception as e:
+            print(f"Error parsing format decision: {e}, response: {response}")
+        
+        # Fallback на table формат
+        return FormatDecision(
+            output_format="table",
+            confidence_score=0.7,
+            clarification_question=None,
+            refined_query=user_query.natural_language_query
+        )
     
     async def _load_relevant_examples(self, output_format: str, query: str) -> List:
         """Загрузка релевантных примеров (заглушка, можно расширить)"""
@@ -144,20 +235,34 @@ class ProductionLLMContract:
         self, 
         query: str, 
         examples: List,
+        user_id: str,
         retry_count: int = 0
     ) -> SQLValidation:
-        """Генерация SQL с многоуровневой валидацией"""
+        """Генерация SQL с многоуровневой валидацией и учетом контекста"""
+        history = self._get_history(user_id)
+        
+        context_prompt = ""
+        if history:
+            context_prompt = "\n\nКОНТЕКСТ ПРЕДЫДУЩИХ ЗАПРОСОВ:\n"
+            recent_history = history[-4:] if len(history) > 4 else history
+            for content in recent_history:
+                if content.role == "user":
+                    text = content.parts[0].text if content.parts else ""
+                    context_prompt += f"Предыдущий запрос: {text}\n"
+        
         prompt = f"""
         USER_QUERY: {query}
+        {context_prompt}
         SCHEMA: {json.dumps(self.table_schema, indent=2)}
         EXAMPLES: {examples}
         
-        Generate optimized PostgreSQL SELECT query:
+        Generate optimized PostgreSQL SELECT query с учетом контекста предыдущих запросов:
         - Use indexes on merchant_city, transaction_timestamp  
         - Add WHERE conditions before JOINs
         - Include LIMIT {DEFAULT_LIMIT} if aggregating large datasets
         - Validate against user intent
         - Only SELECT queries allowed
+        - Учитывай контекст предыдущих сообщений при интерпретации запроса
         
         Return JSON:
         {{
@@ -168,7 +273,12 @@ class ProductionLLMContract:
         """
         
         try:
-            response = self._call_gemini(PRODUCTION_SYSTEM_PROMPT, prompt)
+            response = self._call_gemini(
+                PRODUCTION_SYSTEM_PROMPT, 
+                prompt,
+                conversation_history=history,
+                use_history=True
+            )
             
             # Парсим JSON ответ
             sql_query = None
@@ -253,7 +363,7 @@ class ProductionLLMContract:
             
             # Если небезопасен и есть попытки - регенерируем
             if not validation.is_safe and retry_count < MAX_RETRIES:
-                return await self._generate_and_validate_sql(query, examples, retry_count + 1)
+                return await self._generate_and_validate_sql(query, examples, user_id, retry_count + 1)
             
             return validation
             
@@ -272,22 +382,99 @@ class ProductionLLMContract:
         # Упрощенная реализация - можно улучшить
         return sql_validation
     
-    def _build_clarification_response(self, format_decision: FormatDecision) -> FinalResponse:
+    def _build_clarification_response(self, format_decision: FormatDecision, user_id: str) -> FinalResponse:
         """Построение ответа с запросом уточнения"""
-        return FinalResponse(
-            content=format_decision.clarification_question or "Требуется уточнение запроса",
+        clarification_text = format_decision.clarification_question or "Требуется уточнение запроса"
+        
+        # Сохраняем в историю запрос уточнения
+        response = FinalResponse(
+            content=clarification_text,
             output_format=format_decision.output_format,
             data_preview=None,
             metadata={"requires_clarification": True}
         )
+        
+        # Добавляем в историю (но не сохраняем ответ ассистента, так как это уточняющий вопрос)
+        # История будет обновлена когда пользователь ответит
+        
+        return response
+    
+    async def _check_query_clarity(self, user_query: UserQuery) -> Optional[str]:
+        """Проверка ясности запроса и возврат уточняющего вопроса если нужно"""
+        history = self._get_history(user_query.user_id)
+        
+        prompt = f"""
+        Проанализируй запрос пользователя и определи, достаточно ли информации для его выполнения.
+        
+        ЗАПРОС: {user_query.natural_language_query}
+        
+        Проверь:
+        1. Указаны ли необходимые параметры (даты, фильтры, категории)?
+        2. Понятно ли намерение пользователя?
+        3. Есть ли неоднозначности в запросе?
+        
+        Если запрос неясен или неполон, верни уточняющий вопрос на русском языке.
+        Если запрос понятен, верни null.
+        
+        Верни JSON:
+        {{
+            "is_clear": true/false,
+            "clarification_question": "уточняющий вопрос на русском или null"
+        }}
+        """
+        
+        try:
+            response = self._call_gemini(
+                PRODUCTION_SYSTEM_PROMPT,
+                prompt,
+                conversation_history=history,
+                use_history=True
+            )
+            
+            response_clean = response.strip()
+            if response_clean.startswith("```"):
+                parts = response_clean.split("```")
+                if len(parts) >= 3:
+                    json_part = parts[1]
+                    if json_part.startswith("json"):
+                        json_part = json_part[4:].strip()
+                    response_clean = json_part.strip()
+            
+            json_start = response_clean.find("{")
+            json_end = response_clean.rfind("}")
+            if json_start != -1 and json_end != -1:
+                json_str = response_clean[json_start:json_end + 1]
+                result = json.loads(json_str)
+                if not result.get("is_clear", True):
+                    return result.get("clarification_question")
+        except Exception as e:
+            print(f"Error checking query clarity: {e}")
+        
+        return None
     
     async def process_user_request(self, user_query: UserQuery) -> FinalResponse:
-        """Основной пайплайн обработки запроса"""
+        """Основной пайплайн обработки запроса с поддержкой контекста"""
+        # Шаг 0: Проверка ясности запроса
+        clarification = await self._check_query_clarity(user_query)
+        if clarification:
+            response = FinalResponse(
+                content=clarification,
+                output_format="text",
+                data_preview=None,
+                metadata={"requires_clarification": True}
+            )
+            # Сохраняем запрос пользователя в историю
+            self._add_to_history(user_query.user_id, user_query.natural_language_query, clarification)
+            return response
+        
         # Шаг 1: Определение формата с валидацией
         format_decision = await self._determine_output_format(user_query)
         
         if format_decision.clarification_question:
-            return self._build_clarification_response(format_decision)
+            response = self._build_clarification_response(format_decision, user_query.user_id)
+            # Сохраняем в историю
+            self._add_to_history(user_query.user_id, user_query.natural_language_query, response.content)
+            return response
         
         # Шаг 2: Поиск примеров и генерация SQL
         examples = await self._load_relevant_examples(
@@ -295,20 +482,23 @@ class ProductionLLMContract:
             format_decision.refined_query
         )
         
-        # Шаг 3: Валидация SQL (безопасность + соответствие)
+        # Шаг 3: Валидация SQL (безопасность + соответствие) с учетом истории
         sql_validation = await self._generate_and_validate_sql(
             format_decision.refined_query, 
-            examples
+            examples,
+            user_query.user_id
         )
         
         if not sql_validation.is_safe:
-            raise SecurityException(f"Query violates security policy: {sql_validation.validation_notes}")
+            error_msg = f"Query violates security policy: {sql_validation.validation_notes}"
+            self._add_to_history(user_query.user_id, user_query.natural_language_query, error_msg)
+            raise SecurityException(error_msg)
             
         if not sql_validation.matches_intent:
             sql_validation = await self._regenerate_sql_with_feedback(sql_validation)
         
-        # Возвращаем SQL для выполнения (выполнение будет в sql_to_db.py)
-        return FinalResponse(
+        # Формируем ответ с SQL
+        response = FinalResponse(
             content=sql_validation.sql_query,
             output_format=format_decision.output_format,
             data_preview=None,
@@ -317,6 +507,16 @@ class ProductionLLMContract:
                 "validation_notes": sql_validation.validation_notes
             }
         )
+        
+        # Сохраняем в историю успешный запрос и ответ
+        explanation = sql_validation.validation_notes or "SQL запрос сгенерирован успешно"
+        self._add_to_history(
+            user_query.user_id, 
+            user_query.natural_language_query, 
+            f"Сгенерирован SQL запрос: {sql_validation.sql_query[:100]}... {explanation}"
+        )
+        
+        return response
     
     def generate(self, nl_query: str) -> str:
         """Простой метод для обратной совместимости"""

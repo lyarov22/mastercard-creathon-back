@@ -1,6 +1,6 @@
 import re
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import date, datetime
 from decimal import Decimal
 from sqlalchemy import create_engine, text
@@ -34,6 +34,35 @@ def _convert_to_json_serializable(value: Any) -> Any:
 def _is_select_query(sql_query: str) -> bool:
     """Проверяет, является ли запрос SELECT запросом."""
     return sql_query.strip().upper().startswith(("SELECT", "WITH"))
+
+
+def _has_limit_in_query(sql_query: str) -> bool:
+    """
+    Проверяет, есть ли LIMIT в SQL запросе (включая подзапросы).
+    Если есть LIMIT, батчинг может нарушить логику запроса.
+    """
+    query_upper = sql_query.upper()
+    # Ищем любое вхождение LIMIT
+    return bool(re.search(r'\bLIMIT\s+\d+', query_upper, re.IGNORECASE))
+
+
+def _extract_limit_from_query(sql_query: str) -> Optional[int]:
+    """
+    Извлекает значение последнего (внешнего) LIMIT из SQL запроса.
+    Если LIMIT есть в подзапросе, это тоже важно - батчинг может нарушить логику.
+    """
+    query_upper = sql_query.upper()
+    
+    # Ищем все LIMIT в запросе
+    limit_matches = list(re.finditer(r'\bLIMIT\s+(\d+)', query_upper, re.IGNORECASE))
+    if not limit_matches:
+        return None
+    
+    # Берем последний LIMIT (самый внешний, если есть)
+    # Если LIMIT только в подзапросе, все равно берем его значение
+    last_limit = limit_matches[-1]
+    limit_value = int(last_limit.group(1))
+    return limit_value
 
 
 def _add_limit_offset(sql_query: str, limit: int, offset: int) -> str:
@@ -84,11 +113,39 @@ async def execute_sql_query(sql_query: str, user_intent: str = "") -> ExecutionR
         raise SecurityException(f"Query violates security policy: {validation.validation_notes}")
     
     with engine.connect() as connection:
-        # Для не-SELECT запросов отклоняем
-        # if not _is_select_query(sql_query):
-        #     raise SecurityException("Only SELECT queries are allowed")
+        # Проверяем, есть ли в запросе LIMIT (включая подзапросы)
+        has_limit = _has_limit_in_query(sql_query)
+        query_limit = _extract_limit_from_query(sql_query)
         
-        # Для SELECT запросов используем пагинацию
+        # Если есть LIMIT, выполняем запрос без батчинга
+        # Это важно для запросов типа "топ-10", где LIMIT должен строго соблюдаться
+        # Также важно для запросов с LIMIT в подзапросе - батчинг может нарушить логику
+        if has_limit:
+            try:
+                result = connection.execute(text(sql_query))
+                columns = list(result.keys())
+                rows = result.fetchall()
+                
+                # Преобразуем в словари с JSON-совместимыми значениями
+                all_data: List[Dict[str, Any]] = []
+                for row in rows:
+                    row_dict = {
+                        col: _convert_to_json_serializable(row[i]) 
+                        for i, col in enumerate(columns)
+                    }
+                    all_data.append(row_dict)
+                
+                execution_time_ms = (time.time() - start_time) * 1000
+                
+                return ExecutionResult(
+                    data=all_data,
+                    row_count=len(all_data),
+                    execution_time_ms=execution_time_ms
+                )
+            except Exception as e:
+                raise Exception(f"SQL execution error: {str(e)}")
+        
+        # Для запросов без LIMIT или с большим LIMIT используем батчинг
         all_data: List[Dict[str, Any]] = []
         offset = 0
         total_rows = 0
