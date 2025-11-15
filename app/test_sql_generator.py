@@ -2,15 +2,15 @@
 Консольное приложение для преобразования текстовых запросов в SQL через Gemini API.
 """
 import os
-from dotenv import load_dotenv
 from google import genai
+from app.config import LLM_API_KEY
 from app.models import Transaction
 
 # Загружаем переменные окружения
-load_dotenv()
+client = genai.Client(api_key=LLM_API_KEY)
+
 
 # Глобальная переменная для клиента (будет инициализирована в main)
-client = None
 
 def get_table_schema_prompt():
     """
@@ -102,7 +102,7 @@ def main():
     
     # Инициализация клиента Gemini
     # API ключ можно задать через переменную окружения GEMINI_API_KEY или LLM_API_KEY
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY")
+    api_key = LLM_API_KEY
     if not api_key:
         print("=" * 60)
         print("ОШИБКА: API ключ не найден!")
