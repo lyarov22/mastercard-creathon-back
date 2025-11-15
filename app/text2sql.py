@@ -27,6 +27,7 @@ TABLE_SCHEMA = {
 }
 
 DEFAULT_LIMIT = 100000
+AGGREGATION_THRESHOLD = 10000  # порог для применения агрегации
 
 SYSTEM_PROMPT = f"""
 You are an enterprise Text2SQL generator. Output only SQL. Use table 'transactions'. Use lowercase column names.
@@ -34,38 +35,43 @@ All data in the database is stored in English. For example, city names, bank nam
 If the user speaks Russian or Kazakh, translate their intent to English values where appropriate. 
 Always output SQL in English syntax and using English values.
 
-If listing rows and no limit is given, apply LIMIT {DEFAULT_LIMIT}.
-Allowed operations: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, AVG, SUM, COUNT, MIN, MAX.
-Dates filtered through transaction_timestamp.
-Amounts filtered through transaction_amount_kzt.
-String filters must use ILIKE.
-Never explain anything. Never output text other than SQL.
-Return only raw SQL, starts at SELECT, without "```sql".
+Important:
+- If the expected number of rows may exceed {AGGREGATION_THRESHOLD}, automatically suggest aggregation (SUM, COUNT, AVG, MIN, MAX) to reduce result size.
+- Always try to optimize queries to reduce returned rows when possible.
+- If listing rows and no limit is given, apply LIMIT {DEFAULT_LIMIT}.
+- Allowed operations: SELECT, WHERE, GROUP BY, ORDER BY, LIMIT, AVG, SUM, COUNT, MIN, MAX.
+- Dates filtered through transaction_timestamp.
+- Amounts filtered through transaction_amount_kzt.
+- String filters must use ILIKE.
+- Never explain anything. Never output text other than SQL.
+- Return only raw SQL, starts at SELECT, without "```sql".
 
 Table schema:
 {json.dumps(TABLE_SCHEMA, indent=2)}
 """
 
-ITER_1 = """
+ITER_1 = f"""
 Extract intent, target columns, filters, aggregation, ordering, limits, and time range.
+- If user request may return more than {AGGREGATION_THRESHOLD} rows, plan aggregation to reduce size and make optimized suggest response.
 Return JSON:
-{
+{{
   "aggregation": "... or null",
   "target_columns": [...],
   "filters": [...],
   "order": "... or null",
   "limit": number or null,
-  "time_range": { "from": "...", "to": "..." } or null
-}
+  "time_range": {{ "from": "...", "to": "..." }} or null
+}}
 Return only JSON.
 """
 
 ITER_2 = """
 Using the JSON, build a correct PostgreSQL SQL query.
-Only SQL. Lowercase columns. Use ILIKE for string filters.
+- Apply aggregation if specified or if data may exceed threshold.
+- Use LIMIT to reduce large results when appropriate.
+- Only SQL. Lowercase columns. Use ILIKE for string filters.
 Return only raw SQL, starts at SELECT, without "```sql".
 """
-
 
 class Text2SQLGenerator:
     def __init__(self):
@@ -77,22 +83,28 @@ class Text2SQLGenerator:
             parts=[types.Part.from_text(text=system_instruction), types.Part.from_text(text=user_text)]
         )
         config = types.GenerateContentConfig(
-            system_instruction=None,  # system instruction is passed via content parts
+            system_instruction=None,
             temperature=0.0,
-            max_output_tokens=1500
+            max_output_tokens=5000
         )
         response = client.models.generate_content(
             model=self.model,
             contents=[contents],
             config=config
         )
+        print("start gemini response")
         print(response)
+        print("end gemini response")
         return response.text
 
     def generate(self, nl_query: str) -> str:
+        # Первый шаг — извлечение структуры
         step1 = self._call(SYSTEM_PROMPT, ITER_1 + "\n" + nl_query)
+        print("first step:")
         print(step1)
+        # Второй шаг — генерация SQL
         step2 = self._call(SYSTEM_PROMPT, ITER_2 + "\n" + step1)
+        print("second step:")
         print(step2)
         return step2
 

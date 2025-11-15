@@ -18,7 +18,7 @@ def json_default(obj):
         return float(obj)
     return str(obj)
 
-def stream_select_query(sql_query: str, batch_size: int = 100_000):
+def stream_select_query(sql_query: str, batch_size: int = 10_000):
     """
     Энтерпрайс генератор SELECT запросов.
     Стримит JSON массивы батчами.
