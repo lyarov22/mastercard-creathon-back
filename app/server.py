@@ -7,14 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # для теста, позже можно ограничить
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 engine = build_text2sql()  # твой генератор SQL
 
 @app.get("/process-text")
