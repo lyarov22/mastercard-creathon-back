@@ -1,34 +1,14 @@
-from sqlalchemy import select
-from db import ReadOnlyDB
-from models import Transaction
-import csv
+from app.sql_to_db import execute_sql_query
+from app.text2sql import build_text2sql
 
-def get_shymkent():
+engine = build_text2sql()
 
-    db = ReadOnlyDB()
+while True:
+    text = input("NEW REQUEST: ")
 
-    stmt = select(Transaction).where(Transaction.merchant_city == "Shymkent").limit(1)
+    sql = engine.generate(text)
+    print(sql)
 
-    with db.Session() as session:
-        result = session.execute(stmt).scalars().all()  # вернёт только 1 запись
-        if result:
-            with open("shymkent_transactions3.csv", "w", newline='', encoding='utf-8') as csvfile:
-                fieldnames = result[0].__table__.columns.keys()
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerow({col: getattr(result[0], col) for col in fieldnames})
-    print("done")
+    response = execute_sql_query(sql)
 
-
-def test_gemini():
-    from google import genai
-
-    # The client gets the API key from the environment variable `GEMINI_API_KEY`.
-    client = genai.Client()
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash", contents="Explain how AI works in a few words"
-    )
-    print(response.text)
-
-test_gemini()
+    print(response)
