@@ -1,10 +1,13 @@
 import json
 from google import genai
 from google.genai import types
+import logging
 
 from app.config import LLM_API_KEY
 
+# Инициализация клиента один раз
 client = genai.Client(api_key=LLM_API_KEY)
+logger = logging.getLogger(__name__)
 
 TABLE_SCHEMA = {
     "id": "Integer primary key",
@@ -81,6 +84,7 @@ class Text2SQLGenerator:
         self.model = "gemini-2.5-flash"
 
     def _call(self, system_instruction: str, user_text: str) -> str:
+        """Оптимизированный вызов LLM API"""
         contents = types.Content(
             role="user",
             parts=[types.Part.from_text(text=system_instruction), types.Part.from_text(text=user_text)]
@@ -88,27 +92,38 @@ class Text2SQLGenerator:
         config = types.GenerateContentConfig(
             system_instruction=None,
             temperature=0.0,
-            max_output_tokens=5000
+            max_output_tokens=5000,
+            top_p=0.95,  # Оптимизация для более быстрого ответа
         )
-        response = client.models.generate_content(
-            model=self.model,
-            contents=[contents],
-            config=config
-        )
-        print("start gemini response")
-        print(response)
-        print("end gemini response")
-        return response.text
+        
+        try:
+            response = client.models.generate_content(
+                model=self.model,
+                contents=[contents],
+                config=config
+            )
+            result = response.text.strip()
+            logger.debug(f"LLM response received: {result[:200]}...")
+            return result
+        except Exception as e:
+            logger.error(f"LLM API error: {e}", exc_info=True)
+            raise
 
     def generate(self, nl_query: str) -> str:
+        """
+        Оптимизированная генерация SQL из текстового запроса.
+        Использует двухшаговый подход для лучшего качества.
+        """
+        logger.info(f"Generating SQL for query: {nl_query[:100]}...")
+        
         # Первый шаг — извлечение структуры
         step1 = self._call(SYSTEM_PROMPT, ITER_1 + "\n" + nl_query)
-        print("first step:")
-        print(step1)
+        logger.debug(f"Step 1 (intent extraction): {step1[:200]}...")
+        
         # Второй шаг — генерация SQL
         step2 = self._call(SYSTEM_PROMPT, ITER_2 + "\n" + step1)
-        print("second step:")
-        print(step2)
+        logger.info(f"Step 2 (SQL generation): {step2[:200]}...")
+        
         return step2
 
 def build_text2sql():

@@ -4,6 +4,24 @@ from app.config import DATABASE_URL
 
 BATCH_SIZE = 50000  # Максимальный размер батча
 
+# Оптимизированный engine с connection pooling
+_engine = None
+
+def get_engine():
+    """Получить или создать engine с connection pooling"""
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            DATABASE_URL,
+            pool_size=10,
+            max_overflow=5,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            echo=False,
+            future=True,
+        )
+    return _engine
+
 
 def _is_select_query(sql_query: str) -> bool:
     """Проверяет, является ли запрос SELECT запросом."""
@@ -40,12 +58,12 @@ def _add_limit_offset(sql_query: str, limit: int, offset: int) -> str:
 def execute_sql_query(sql_query: str):
     """
     Выполняет SQL запрос и выводит результат в консоль.
-    Оптимизировано для больших результатов: обрабатывает батчами по 100к записей.
+    Оптимизировано для больших результатов: обрабатывает батчами по 50к записей.
     
     Args:
         sql_query: SQL запрос в виде строки (например, "SELECT * FROM transactions")
     """
-    engine = create_engine(DATABASE_URL)
+    engine = get_engine()
     
     with engine.connect() as connection:
         # Для не-SELECT запросов выполняем как есть

@@ -1,12 +1,21 @@
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
-from config import DATABASE_URL
-from models import Transaction
+from app.config import DATABASE_URL
+from app.models import Transaction
 
 class ReadOnlyDB:
     def __init__(self, batch_size=1_000_000):
-        self.engine = create_engine(DATABASE_URL)
-        self.Session = sessionmaker(bind=self.engine)
+        # Оптимизированный engine с connection pooling
+        self.engine = create_engine(
+            DATABASE_URL,
+            pool_size=20,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            echo=False,
+            future=True,
+        )
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
         self.batch_size = batch_size  # лимит батча по умолчанию
 
     def read_batch(self, offset=0, limit=None):
@@ -21,9 +30,11 @@ class ReadOnlyDB:
             return session.execute(stmt).scalars().all()
 
     def count(self):
-        """Количество записей в таблице"""
+        """Количество записей в таблице (оптимизировано)"""
         with self.Session() as session:
-            return session.query(Transaction).count()
+            from sqlalchemy import func
+            stmt = select(func.count(Transaction.id))
+            return session.execute(stmt).scalar_one()
 
     def execute_select(self, stmt):
         """
