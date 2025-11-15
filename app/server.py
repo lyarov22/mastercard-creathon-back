@@ -1,16 +1,17 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from app.text2sql import build_text2sql
-from app.sql_streamer import stream_select_query
+from app.text2sql_local import build_text2sql_local
 from app.sql_to_db import execute_sql_query
 from app.models import UserQuery, FinalResponse
 from app.security_validator import SecurityException
 
 app = FastAPI()
 
-engine = build_text2sql()
+# engine = build_text2sql()
+engine = build_text2sql_local()
 
 app.add_middleware(
     CORSMiddleware,
