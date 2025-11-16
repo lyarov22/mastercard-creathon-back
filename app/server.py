@@ -10,8 +10,9 @@ from app.security_validator import SecurityException
 
 app = FastAPI()
 
-# engine = build_text2sql()
-engine = build_text2sql_local()
+# Инициализируем оба движка
+api_engine = build_text2sql()
+llm_engine = build_text2sql_local()
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +27,14 @@ async def process_text_stream(req: UserQuery):
     query = req.natural_language_query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Field 'natural_language_query' is required")
+    
+    # Выбираем движок в зависимости от параметра model
+    if req.model == "api":
+        engine = api_engine
+        print(f"Using API engine (Gemini) for user {req.user_id}")
+    else:  # "llm" или по умолчанию
+        engine = llm_engine
+        print(f"Using LLM engine (Ollama) for user {req.user_id}")
     
     print(f"Received query from user {req.user_id}: {query}")
 
@@ -101,7 +110,9 @@ class ClearHistoryRequest(BaseModel):
 async def clear_history(req: ClearHistoryRequest):
     """Очистка истории диалога для пользователя"""
     try:
-        engine._clear_history(req.user_id)
+        # Очищаем историю в обоих движках
+        api_engine._clear_history(req.user_id)
+        #llm_engine._clear_history(req.user_id)
         return JSONResponse(content={"message": f"History cleared for user {req.user_id}"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing history: {str(e)}")

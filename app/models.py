@@ -65,6 +65,7 @@ class TransactionSchema(BaseModel):
 class UserQuery(BaseModel):
     natural_language_query: str
     user_id: str
+    model: Literal["llm", "api"] = "api"
 
 class FormatDecision(BaseModel):
     output_format: Literal["text", "table", "graph", "diagram"]
